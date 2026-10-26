@@ -881,7 +881,7 @@ async def slots(interaction: discord.Interaction, bet: int = 10):
 @bot.tree.command(name="coinflip_bet", description="bet coins on heads or tails")
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 @app_commands.describe(side="heads or tails")
-async def coinflip_bet(interaction: discord.Interaction, bet: int = 10, side: str):
+async def coinflip_bet(interaction: discord.Interaction, side: str, bet: int = 10):
     bet = max(10, min(bet, get_balance(interaction.user.id)))
     bal = get_balance(interaction.user.id)
     if bal < bet:
@@ -920,7 +920,7 @@ async def coinflip_bet(interaction: discord.Interaction, bet: int = 10, side: st
 @bot.tree.command(name="dice_bet", description="bet high or low on a d6 roll")
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 @app_commands.describe(guess="high (4-6) or low (1-3)")
-async def dice_bet(interaction: discord.Interaction, bet: int = 10, guess: str):
+async def dice_bet(interaction: discord.Interaction, guess: str, bet: int = 10):
     bet = max(10, min(bet, get_balance(interaction.user.id)))
     bal = get_balance(interaction.user.id)
     if bal < bet:
