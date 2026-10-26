@@ -365,9 +365,9 @@ async def on_app_command_error(interaction, error):
 # ---- MODALS ----
 
 class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
-    channel = discord.ui.InputText(label="Channel", placeholder="e.g. roles", style=discord.TextStyle.short, required=True)
-    title = discord.ui.InputText(label="Embed Title", placeholder="e.g. Pick Your Roles", style=discord.TextStyle.short, required=True)
-    description = discord.ui.InputText(label="Description", placeholder="e.g. React below to get your roles!", style=discord.TextStyle.paragraph, required=False)
+    channel = discord.ui.TextInput(label="Channel", placeholder="e.g. roles", style=discord.TextStyle.short, required=True)
+    title = discord.ui.TextInput(label="Embed Title", placeholder="e.g. Pick Your Roles", style=discord.TextStyle.short, required=True)
+    description = discord.ui.TextInput(label="Description", placeholder="e.g. React below to get your roles!", style=discord.TextStyle.paragraph, required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         channel_name = self.channel.value.lstrip("#")
@@ -398,9 +398,9 @@ class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
 
 
 class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
-    emoji = discord.ui.InputText(label="Emoji", placeholder="paste the emoji here", style=discord.TextStyle.short, required=True)
-    role_name = discord.ui.InputText(label="Role Name", placeholder="e.g. Gamer", style=discord.TextStyle.short, required=True)
-    channel_name = discord.ui.InputText(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="paste the emoji here", style=discord.TextStyle.short, required=True)
+    role_name = discord.ui.TextInput(label="Role Name", placeholder="e.g. Gamer", style=discord.TextStyle.short, required=True)
+    channel_name = discord.ui.TextInput(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         channel_name = self.channel_name.value.lstrip("#")
@@ -449,8 +449,8 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
 
 
 class RemoveReactionModal(discord.ui.Modal, title="Remove Reaction Role"):
-    emoji = discord.ui.InputText(label="Emoji", placeholder="the emoji to remove", style=discord.TextStyle.short, required=True)
-    channel_name = discord.ui.InputText(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
+    emoji = discord.ui.TextInput(label="Emoji", placeholder="the emoji to remove", style=discord.TextStyle.short, required=True)
+    channel_name = discord.ui.TextInput(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         channel_name = self.channel_name.value.lstrip("#")
