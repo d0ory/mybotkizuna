@@ -54,7 +54,7 @@ DAILY_CLAIMED = {}  # user_id -> last claim timestamp
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.guild_bans = True
+intents.moderation = True
 
 class MyBot(commands.Bot):
     def __init__(self):
