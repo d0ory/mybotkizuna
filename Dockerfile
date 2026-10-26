@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir discord.py python-dotenv
 
 COPY . .
 
-CMD ["python", "bot.py"]   git add Dockerfile
+CMD ["python", "bot.py"]   
