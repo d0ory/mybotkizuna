@@ -35,7 +35,7 @@ WELCOME_CHANNEL_ID = 1561207036274806784
 LOG_CHANNEL = "mod-log"
 BANNED_WORDS = ["rape", "nigga", "rapist"]
 MEMBERS_ROLE_ID = 1561174087823265913
-RULES_EMOJI = "✅"
+RULES_EMOJI = "🍒"
 
 ROLES_MESSAGES = {}
 RULES_MESSAGES = {}
@@ -127,7 +127,7 @@ async def on_member_join(member):
     embed.set_author(name=f"🎉 Welcome to {member.guild.name}!", icon_url=member.guild.icon.url if member.guild.icon else None)
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name=f"Hey {member.mention} 👋", value="You're now part of the community!\nHere's what to do next:", inline=False)
-    embed.add_field(name="📋 Get Started", value="1️⃣ Read the **rules** with `/rules` and react ✅ to unlock your role\n2️⃣ Grab your roles in the reaction roles channel\n3️⃣ Say hi in the chat and introduce yourself!", inline=False)
+    embed.add_field(name="📋 Get Started", value="1️⃣ Read the **rules** with `/rules` and react 🍒 to unlock your role\n2️⃣ Grab your roles in the reaction roles channel\n3️⃣ Say hi in the chat and introduce yourself!", inline=False)
     embed.add_field(name="🎮 Have Fun", value="Try `/slots`, `/coinflip_bet`, or `/blackjack` to win some coins!\nType `/help` anytime to see everything I can do.", inline=False)
     embed.set_footer(text=f"Member #{member.guild.member_count} • Welcome aboard 💜", icon_url=member.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
@@ -240,7 +240,7 @@ async def on_raw_reaction_add(payload):
                 try:
                     guild_obj = await bot.fetch_guild(payload.guild_id)
                     member = await guild_obj.fetch_member(payload.user_id)
-                    role = discord.utils.get(guild_obj.roles, id=MEMBERS_ROLE_ID)
+                    role = guild_obj.get_role(MEMBERS_ROLE_ID)
                     if role and role not in member.roles:
                         await member.add_roles(role, reason="accepted rules")
                 except (discord.Forbidden, discord.NotFound):
@@ -262,13 +262,13 @@ async def on_raw_reaction_add(payload):
             if stripped.startswith("  "):
                 parts = stripped.split("  ", 1)
                 if len(parts) == 2:
-                    emoji_str, role_name = parts[0].strip(), parts[1].strip()
+                    emoji_str, role_id_str = parts[0].strip(), parts[1].strip()
                     if emoji_str == str(payload.emoji):
                         member = await guild_obj.fetch_member(payload.user_id)
-                        role = discord.utils.get(guild_obj.roles, name=role_name)
+                        role = guild_obj.get_role(int(role_id_str))
                         if role:
                             await member.add_roles(role, reason=f"reaction role {emoji_str}")
-    except (discord.Forbidden, discord.NotFound, IndexError):
+    except (discord.Forbidden, discord.NotFound, ValueError, IndexError):
         pass
 
 @bot.event
@@ -291,13 +291,13 @@ async def on_raw_reaction_remove(payload):
             if stripped.startswith("  "):
                 parts = stripped.split("  ", 1)
                 if len(parts) == 2:
-                    emoji_str, role_name = parts[0].strip(), parts[1].strip()
+                    emoji_str, role_id_str = parts[0].strip(), parts[1].strip()
                     if emoji_str == str(payload.emoji):
                         member = await guild_obj.fetch_member(payload.user_id)
-                        role = discord.utils.get(guild_obj.roles, name=role_name)
+                        role = guild_obj.get_role(int(role_id_str))
                         if role and role in member.roles:
                             await member.remove_roles(role, reason=f"removed reaction role {emoji_str}")
-    except (discord.Forbidden, discord.NotFound, IndexError):
+    except (discord.Forbidden, discord.NotFound, ValueError, IndexError):
         pass
 
 @bot.event
@@ -470,7 +470,7 @@ class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
 
 class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
     emoji = discord.ui.TextInput(label="Emoji", placeholder="paste the emoji here", style=discord.TextStyle.short, required=True)
-    role_name = discord.ui.TextInput(label="Role Name", placeholder="e.g. Gamer", style=discord.TextStyle.short, required=True)
+    role_id = discord.ui.TextInput(label="Role ID", placeholder="paste the role ID here", style=discord.TextStyle.short, required=True)
     channel_name = discord.ui.TextInput(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -483,9 +483,14 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
             if not target_channel:
                 await interaction.response.send_message("❌ channel not found. try the exact name or paste the channel ID.", ephemeral=True)
                 return
-            role = discord.utils.get(guild.roles, name=self.role_name.value)
+            try:
+                role_id_val = int(self.role_id.value)
+            except ValueError:
+                await interaction.response.send_message("❌ invalid role ID. paste the numeric ID (right-click role → copy ID).", ephemeral=True)
+                return
+            role = guild.get_role(role_id_val)
             if not role:
-                await interaction.response.send_message(f"role **{self.role_name.value}** not found. make sure it exists in server settings.", ephemeral=True)
+                await interaction.response.send_message(f"role with ID **{role_id_val}** not found.", ephemeral=True)
                 return
             if guild.id not in ROLES_MESSAGES:
                 await interaction.response.send_message("no reaction roles embed found. run **`/setup_roles`** first.", ephemeral=True)
@@ -501,7 +506,7 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
             embed = message.embeds[0]
             desc_lines = (embed.description or "").split("\n")
             desc_lines = [l for l in desc_lines if "_none yet" not in l]
-            new_line = f"  {self.emoji.value}  {self.role_name.value}"
+            new_line = f"  {self.emoji.value}  {role_id_val}"
             desc_lines.append(new_line)
             embed.description = "\n".join(desc_lines)
             try:
@@ -512,11 +517,11 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
                 return
             confirm = discord.Embed(
                 title="✅ reaction added",
-                description=f"**{self.emoji.value}** → **{self.role_name.value}**\n\nposted in **#{target_channel.name}**",
+                description=f"**{self.emoji.value}** → **{role.name}**\n\nposted in **#{target_channel.name}**",
                 color=discord.Color.green()
             )
             await interaction.response.send_message(embed=confirm, ephemeral=True)
-            await log_action(guild, f"**roles update** — {self.emoji.value} → {self.role_name.value} added by {interaction.user.mention}", discord.Color.green())
+            await log_action(guild, f"**roles update** — {self.emoji.value} → {role.name} added by {interaction.user.mention}", discord.Color.green())
         except Exception as e:
             print(f"ADD_REACTION ERROR: {e}")
             try:
@@ -643,7 +648,7 @@ async def hello(interaction: discord.Interaction, user: discord.Member = None):
 async def say(interaction: discord.Interaction, text: str):
     await interaction.response.send_message(text)
 
-@bot.tree.command(name="rules", description="server rules — react ✅ to get your role")
+@bot.tree.command(name="rules", description="server rules — react 🍒 to get your role")
 async def rules(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📜 Server Rules",
@@ -686,7 +691,7 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(name="🎰 Casino & Gambling", value="`/slots` — spin the slot machine\n`/coinflip_bet` — bet on heads or tails\n`/dice_bet` — bet high or low on a d6\n`/blackjack` — play interactive blackjack (hit/stand!)\n`/balance` — check your coin balance\n`/daily` — claim 50 free coins (once per day)", inline=False)
     embed.add_field(name="🎲 Fun", value="`/8ball` — ask the magic 8-ball\n`/coinflip` — flip a coin (no betting)\n`/roll` — roll dice\n`/hello` — say hi to someone\n`/say` — make me say anything", inline=False)
     embed.add_field(name="🛠️ Utility", value="`/poll` — create a quick A/B poll\n`/remind` — set a reminder (1-1440 min)", inline=False)
-    embed.add_field(name="💡 Tips", value="• You start with **100 coins** — use `/daily` for more\n• Casino bets are risky — don't bet what you can't afford to lose!\n• Balances reset when the bot restarts\n• React ✅ on `/rules` to get your member role\n• Blackjack is interactive — use the buttons!\n• Staff? Use **`/staffhelp`** for extra commands", inline=False)
+    embed.add_field(name="💡 Tips", value="• You start with **100 coins** — use `/daily` for more\n• Casino bets are risky — don't bet what you can't afford to lose!\n• Balances reset when the bot restarts\n• React 🍒 on `/rules` to get your member role\n• Blackjack is interactive — use the buttons!\n• Staff? Use **`/staffhelp`** for extra commands", inline=False)
     embed.set_footer(text=f"Made for {interaction.guild.name}")
     await interaction.response.send_message(embed=embed)
 
