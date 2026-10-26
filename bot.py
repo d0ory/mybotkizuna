@@ -49,6 +49,7 @@ ROLE_DELETE_TRACK = {}
 
 BALANCES = {}
 DAILY_CLAIMED = {}
+BLACKJACK_GAMES = {}  # user_id -> game state
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -94,14 +95,17 @@ def get_balance(user_id: int) -> int:
 def add_balance(user_id: int, amount: int):
     BALANCES[user_id] = get_balance(user_id) + amount
 
-def find_channel(guild, query: str):
+def find_channel_in_guild(guild, query: str):
+    """Find a channel by ID, exact name, or fuzzy name."""
+    if not guild:
+        return None
     query = query.strip().lstrip("#")
     try:
         channel_id = int(query)
-        ch = discord.utils.get(guild.channels, id=channel_id)
-        if ch:
+        ch = guild.get_channel(channel_id)
+        if ch and isinstance(ch, discord.TextChannel):
             return ch
-    except ValueError:
+    except (ValueError, TypeError):
         pass
 
     def normalize(s):
@@ -355,6 +359,113 @@ async def on_app_command_error(interaction, error):
         if not interaction.response.is_done():
             await interaction.response.send_message("something went wrong.", ephemeral=True)
 
+# ---- BLACKJACK VIEW ----
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+
+    @discord.ui.button(label="🃏 Hit", style=discord.ButtonStyle.green, custom_id="bj_hit")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ this isn't your game!", ephemeral=True)
+            return
+
+        game = BLACKJACK_GAMES.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("game already over!", ephemeral=True)
+            return
+
+        game["player_hand"].append(game["draw"]())
+        player_total = game["calc"](game["player_hand"])
+        game["player_total"] = player_total
+
+        if player_total > 21:
+            game["over"] = True
+            self.hit.disabled = True
+            self.stand.disabled = True
+            add_balance(self.user_id, -game["bet"])
+            embed = game["make_embed"](
+                f"💀 You **busted** with {player_total}! Dealer wins.\nYou lost **{game['bet']}** coins.",
+                discord.Color.red,
+                reveal_dealer=True
+            )
+            del BLACKJACK_GAMES[self.user_id]
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        embed = game["make_embed"](
+            f"**Your hand:** {game['fmt'](game['player_hand'])} → **{player_total}**\n**Dealer:** {game['fmt_dealer'](game['dealer_hand'])}\n\nHit or Stand?",
+            discord.Color.gold
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="✋ Stand", style=discord.ButtonStyle.red, custom_id="bj_stand")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ this isn't your game!", ephemeral=True)
+            return
+
+        game = BLACKJACK_GAMES.get(self.user_id)
+        if not game:
+            await interaction.response.send_message("game already over!", ephemeral=True)
+            return
+
+        game["over"] = True
+        self.hit.disabled = True
+        self.stand.disabled = True
+
+        dealer_hand = game["dealer_hand"]
+        while game["calc"](dealer_hand) < 17:
+            dealer_hand.append(game["draw"]())
+        dealer_total = game["calc"](dealer_hand)
+        player_total = game["player_total"]
+
+        if dealer_total > 21:
+            add_balance(self.user_id, game["bet"] * 2)
+            msg = f"🎉 Dealer **busted** with {dealer_total}! You win **{game['bet'] * 2}** coins!"
+            color = discord.Color.green
+        elif player_total > dealer_total:
+            add_balance(self.user_id, game["bet"] * 2)
+            msg = f"🎉 You **win** {player_total} vs {dealer_total}! +**{game['bet'] * 2}** coins!"
+            color = discord.Color.green
+        elif player_total == dealer_total:
+            add_balance(self.user_id, game["bet"])
+            msg = f"🤝 **Push!** Both have {player_total}. Bet returned."
+            color = discord.Color.orange
+        else:
+            add_balance(self.user_id, -game["bet"])
+            msg = f"😔 Dealer wins {dealer_total} vs your {player_total}. -{game['bet']} coins."
+            color = discord.Color.red
+
+        embed = game["make_embed"](
+            f"**Your hand:** {game['fmt'](game['player_hand'])} → **{player_total}**\n**Dealer:** {game['fmt'](dealer_hand)} → **{dealer_total}**\n\n{msg}\n**New balance:** {get_balance(self.user_id)} 🪙",
+            color,
+            reveal_dealer=True
+        )
+        del BLACKJACK_GAMES[self.user_id]
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        if self.user_id in BLACKJACK_GAMES:
+            game = BLACKJACK_GAMES[self.user_id]
+            add_balance(self.user_id, -game["bet"])
+            self.hit.disabled = True
+            self.stand.disabled = True
+            del BLACKJACK_GAMES[self.user_id]
+            try:
+                await self.message.edit(
+                    embed=game["make_embed"](
+                        f"⏰ **Timed out!** You lost **{game['bet']}** coins.\n**New balance:** {get_balance(self.user_id)} 🪙",
+                        discord.Color.red,
+                        reveal_dealer=True
+                    ),
+                    view=self
+                )
+            except Exception:
+                pass
+
 # ---- MODALS ----
 
 class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
@@ -363,9 +474,38 @@ class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
     description = discord.ui.TextInput(label="Description", placeholder="e.g. React below to get your roles!", style=discord.TextStyle.paragraph, required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
-        channel = find_channel(interaction.guild, self.channel.value)
-        if not channel:
-            await interaction.response.send_message("channel not found. try the exact name or paste the channel ID (right-click channel → copy ID).", ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("error: no guild context.", ephemeral=True)
+            return
+
+        raw = self.channel.value.strip().lstrip("#")
+        target_channel = None
+
+        try:
+            cid = int(raw)
+            target_channel = guild.get_channel(cid)
+            if target_channel and not isinstance(target_channel, discord.TextChannel):
+                target_channel = None
+        except (ValueError, TypeError):
+            pass
+
+        if not target_channel:
+            def norm(s):
+                return unicodedata.normalize("NFKC", s).lower().replace(" ", "").replace("-", "").replace("_", "")
+            q = norm(raw)
+            for ch in guild.text_channels:
+                if norm(ch.name) == q:
+                    target_channel = ch
+                    break
+            if not target_channel:
+                for ch in guild.text_channels:
+                    if q in norm(ch.name):
+                        target_channel = ch
+                        break
+
+        if not target_channel:
+            await interaction.response.send_message("❌ channel not found. try the exact name or paste the channel ID (right-click channel → copy ID).", ephemeral=True)
             return
 
         desc = self.description.value or "react below to get your roles!"
@@ -374,19 +514,19 @@ class SetupRolesModal(discord.ui.Modal, title="Create Reaction Roles"):
             description=f"{desc}\n\n**available roles:**\n\n  _none yet. use `/add_reaction` to add some._",
             color=discord.Color.teal()
         )
-        embed.set_footer(text=f"managed by {interaction.guild.name} bot")
+        embed.set_footer(text=f"managed by {guild.name} bot")
         embed.timestamp = discord.utils.utcnow()
 
-        msg = await channel.send(embed=embed)
-        ROLES_MESSAGES[interaction.guild.id] = msg.id
+        msg = await target_channel.send(embed=embed)
+        ROLES_MESSAGES[guild.id] = msg.id
 
         confirm = discord.Embed(
             title="✅ reaction roles created",
-            description=f"posted in **#{channel.name}**\n\nuse **`/add_reaction`** to add emoji + role pairs",
+            description=f"posted in **#{target_channel.name}**\n\nuse **`/add_reaction`** to add emoji + role pairs",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=confirm, ephemeral=True)
-        await log_action(interaction.guild, f"**roles setup** — reaction roles embed created in #{channel.name} by {interaction.user.mention}", discord.Color.green())
+        await log_action(guild, f"**roles setup** — reaction roles embed created in #{target_channel.name} by {interaction.user.mention}", discord.Color.green())
 
 
 class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
@@ -395,22 +535,51 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
     channel_name = discord.ui.TextInput(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
-        channel = find_channel(interaction.guild, self.channel_name.value)
-        if not channel:
-            await interaction.response.send_message("channel not found. try the exact name or paste the channel ID.", ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("error: no guild context.", ephemeral=True)
             return
 
-        role = discord.utils.get(interaction.guild.roles, name=self.role_name.value)
+        raw = self.channel_name.value.strip().lstrip("#")
+        target_channel = None
+
+        try:
+            cid = int(raw)
+            target_channel = guild.get_channel(cid)
+            if target_channel and not isinstance(target_channel, discord.TextChannel):
+                target_channel = None
+        except (ValueError, TypeError):
+            pass
+
+        if not target_channel:
+            def norm(s):
+                return unicodedata.normalize("NFKC", s).lower().replace(" ", "").replace("-", "").replace("_", "")
+            q = norm(raw)
+            for ch in guild.text_channels:
+                if norm(ch.name) == q:
+                    target_channel = ch
+                    break
+            if not target_channel:
+                for ch in guild.text_channels:
+                    if q in norm(ch.name):
+                        target_channel = ch
+                        break
+
+        if not target_channel:
+            await interaction.response.send_message("❌ channel not found. try the exact name or paste the channel ID.", ephemeral=True)
+            return
+
+        role = discord.utils.get(guild.roles, name=self.role_name.value)
         if not role:
             await interaction.response.send_message(f"role **{self.role_name.value}** not found. make sure it exists in server settings.", ephemeral=True)
             return
 
-        if interaction.guild.id not in ROLES_MESSAGES:
+        if guild.id not in ROLES_MESSAGES:
             await interaction.response.send_message("no reaction roles embed found. run **`/setup_roles`** first.", ephemeral=True)
             return
 
         try:
-            message = await channel.fetch_message(ROLES_MESSAGES[interaction.guild.id])
+            message = await target_channel.fetch_message(ROLES_MESSAGES[guild.id])
         except discord.NotFound:
             await interaction.response.send_message("the roles embed was deleted. run **`/setup_roles`** again.", ephemeral=True)
             return
@@ -430,11 +599,11 @@ class AddReactionModal(discord.ui.Modal, title="Add Reaction Role"):
 
         confirm = discord.Embed(
             title="✅ reaction added",
-            description=f"**{self.emoji.value}** → **{self.role_name.value}**\n\nposted in **#{channel.name}**",
+            description=f"**{self.emoji.value}** → **{self.role_name.value}**\n\nposted in **#{target_channel.name}**",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=confirm, ephemeral=True)
-        await log_action(interaction.guild, f"**roles update** — {self.emoji.value} → {self.role_name.value} added by {interaction.user.mention}", discord.Color.green())
+        await log_action(guild, f"**roles update** — {self.emoji.value} → {self.role_name.value} added by {interaction.user.mention}", discord.Color.green())
 
 
 class RemoveReactionModal(discord.ui.Modal, title="Remove Reaction Role"):
@@ -442,17 +611,46 @@ class RemoveReactionModal(discord.ui.Modal, title="Remove Reaction Role"):
     channel_name = discord.ui.TextInput(label="Channel", placeholder="where the roles embed is posted", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
-        channel = find_channel(interaction.guild, self.channel_name.value)
-        if not channel:
-            await interaction.response.send_message("channel not found. try the exact name or paste the channel ID.", ephemeral=True)
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("error: no guild context.", ephemeral=True)
             return
 
-        if interaction.guild.id not in ROLES_MESSAGES:
+        raw = self.channel_name.value.strip().lstrip("#")
+        target_channel = None
+
+        try:
+            cid = int(raw)
+            target_channel = guild.get_channel(cid)
+            if target_channel and not isinstance(target_channel, discord.TextChannel):
+                target_channel = None
+        except (ValueError, TypeError):
+            pass
+
+        if not target_channel:
+            def norm(s):
+                return unicodedata.normalize("NFKC", s).lower().replace(" ", "").replace("-", "").replace("_", "")
+            q = norm(raw)
+            for ch in guild.text_channels:
+                if norm(ch.name) == q:
+                    target_channel = ch
+                    break
+            if not target_channel:
+                for ch in guild.text_channels:
+                    if q in norm(ch.name):
+                        target_channel = ch
+                        break
+
+        if not target_channel:
+            await interaction.response.send_message("❌ channel not found. try the exact name or paste the channel ID.", ephemeral=True)
+            return
+
+        if guild.id not in ROLES_MESSAGES:
             await interaction.response.send_message("no reaction roles embed found.", ephemeral=True)
             return
 
         try:
-            message = await channel.fetch_message(ROLES_MESSAGES[interaction.guild.id])
+            message = await target_channel.fetch_message(ROLES_MESSAGES[guild.id])
         except discord.NotFound:
             await interaction.response.send_message("the roles embed was deleted.", ephemeral=True)
             return
@@ -490,7 +688,7 @@ class RemoveReactionModal(discord.ui.Modal, title="Remove Reaction Role"):
 
         confirm = discord.Embed(
             title="✅ reaction removed",
-            description=f"**{self.emoji.value}** removed from **#{channel.name}**",
+            description=f"**{self.emoji.value}** removed from **#{target_channel.name}**",
             color=discord.Color.orange()
         )
         await interaction.response.send_message(embed=confirm, ephemeral=True)
@@ -621,7 +819,7 @@ async def help_cmd(interaction: discord.Interaction):
         value="`/slots` — spin the slot machine\n"
               "`/coinflip_bet` — bet on heads or tails\n"
               "`/dice_bet` — bet high or low on a d6\n"
-              "`/blackjack` — play a round of blackjack\n"
+              "`/blackjack` — play interactive blackjack (hit/stand!)\n"
               "`/balance` — check your coin balance\n"
               "`/daily` — claim 50 free coins (once per day)",
         inline=False
@@ -647,6 +845,7 @@ async def help_cmd(interaction: discord.Interaction):
               "• Casino bets are risky — don't bet what you can't afford to lose!\n"
               "• Balances reset when the bot restarts\n"
               "• React ✅ on `/rules` to get your member role\n"
+              "• Blackjack is interactive — use the buttons!\n"
               "• Staff? Use **`/staffhelp`** for extra commands",
         inline=False
     )
@@ -833,12 +1032,12 @@ async def daily(interaction: discord.Interaction):
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 async def slots(interaction: discord.Interaction, bet: int = 10):
     bal = get_balance(interaction.user.id)
-    bet = max(10, min(bet, bal))
     if bal < 10:
         await interaction.response.send_message(f"❌ you only have **{bal}** coins! use `/daily` for more.", ephemeral=True)
         return
+    bet = max(10, min(bet, bal))
 
-    await interaction.response.send_message("🎰 spinning...", ephemeral=True)
+    await interaction.response.send_message("🎰 spinning...", ephemeral=False)
     await asyncio.sleep(1.5)
 
     symbols = ["🍒", "🍋", "🔔", "⭐", "💎", "7️⃣"]
@@ -874,7 +1073,7 @@ async def slots(interaction: discord.Interaction, bet: int = 10):
     add_balance(interaction.user.id, -bet)
 
     embed = discord.Embed(
-        title="🎰 Slot Machine",
+        title=f"🎰 {interaction.user.display_name} — Slot Machine",
         description=f"{display}\n\n{msg}\n\n**Bet:** {bet} 🪙 → **Won:** {winnings} 🪙\n**New balance:** {get_balance(interaction.user.id)} 🪙",
         color=color
     )
@@ -886,16 +1085,16 @@ async def slots(interaction: discord.Interaction, bet: int = 10):
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 async def coinflip_bet(interaction: discord.Interaction, side: str, bet: int = 10):
     bal = get_balance(interaction.user.id)
-    bet = max(10, min(bet, bal))
     if bal < 10:
         await interaction.response.send_message(f"❌ you only have **{bal}** coins!", ephemeral=True)
         return
+    bet = max(10, min(bet, bal))
     side = side.lower()
     if side not in ("heads", "tails"):
         await interaction.response.send_message("❌ pick **heads** or **tails**.", ephemeral=True)
         return
 
-    await interaction.response.send_message("🪙 flipping...", ephemeral=True)
+    await interaction.response.send_message("🪙 flipping...", ephemeral=False)
     await asyncio.sleep(1)
 
     result = random.choice(["heads", "tails"])
@@ -913,7 +1112,7 @@ async def coinflip_bet(interaction: discord.Interaction, side: str, bet: int = 1
         color = discord.Color.red()
 
     embed = discord.Embed(
-        title="🪙 Coin Flip Bet",
+        title=f"🪙 {interaction.user.display_name} — Coin Flip Bet",
         description=f"You bet on **{side.title()}**\nResult: **{result.title()}**\n\n{msg}\n\n**New balance:** {get_balance(interaction.user.id)} 🪙",
         color=color
     )
@@ -925,16 +1124,16 @@ async def coinflip_bet(interaction: discord.Interaction, side: str, bet: int = 1
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 async def dice_bet(interaction: discord.Interaction, guess: str, bet: int = 10):
     bal = get_balance(interaction.user.id)
-    bet = max(10, min(bet, bal))
     if bal < 10:
         await interaction.response.send_message(f"❌ you only have **{bal}** coins!", ephemeral=True)
         return
+    bet = max(10, min(bet, bal))
     guess = guess.lower()
     if guess not in ("high", "low"):
         await interaction.response.send_message("❌ pick **high** (4-6) or **low** (1-3).", ephemeral=True)
         return
 
-    await interaction.response.send_message("🎲 rolling...", ephemeral=True)
+    await interaction.response.send_message("🎲 rolling...", ephemeral=False)
     await asyncio.sleep(1)
 
     roll = random.randint(1, 6)
@@ -952,33 +1151,40 @@ async def dice_bet(interaction: discord.Interaction, guess: str, bet: int = 10):
         color = discord.Color.red()
 
     embed = discord.Embed(
-        title="🎲 Dice Bet",
+        title=f"🎲 {interaction.user.display_name} — Dice Bet",
         description=f"You bet on **{guess.title()}**\nResult: {dice_faces[roll-1]} **{roll}** ({'High' if is_high else 'Low'})\n\n{msg}\n\n**New balance:** {get_balance(interaction.user.id)} 🪙",
         color=color
     )
     embed.set_footer(text="2x payout • 50/50 odds (1-3 low, 4-6 high)")
     await interaction.edit_original_response(content=None, embed=embed)
 
-@bot.tree.command(name="blackjack", description="play a round of blackjack (bet min 10)")
+@bot.tree.command(name="blackjack", description="play interactive blackjack! (bet min 10)")
 @app_commands.describe(bet="how many coins to bet? (min 10)")
 async def blackjack(interaction: discord.Interaction, bet: int = 10):
-    bal = get_balance(interaction.user.id)
-    bet = max(10, min(bet, bal))
+    user_id = interaction.user.id
+    bal = get_balance(user_id)
     if bal < 10:
-        await interaction.response.send_message(f"❌ you only have **{bal}** coins!", ephemeral=True)
+        await interaction.response.send_message(f"❌ you only have **{bal}** coins! use `/daily` for more.", ephemeral=True)
+        return
+    bet = max(10, min(bet, bal))
+
+    if user_id in BLACKJACK_GAMES:
+        await interaction.response.send_message("❌ you already have a game in progress! finish or wait for it to timeout.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
+    # Build the deck
+    suits = ["♠️", "♥️", "♦️", "♣️"]
+    ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+    deck = []
+    for s in suits:
+        for r in ranks:
+            deck.append((f"{r}{s}", 11 if r == "A" else (10 if r in ("J", "Q", "K") else int(r))))
+    random.shuffle(deck)
 
-    def draw_card():
-        suits = ["♠️", "♥️", "♦️", "♣️"]
-        ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-        suit = random.choice(suits)
-        rank = random.choice(ranks)
-        value = 11 if rank == "A" else (10 if rank in ("J", "Q", "K") else int(rank))
-        return f"{rank}{suit}", value
+    def draw():
+        return deck.pop()
 
-    def hand_value(hand):
+    def calc(hand):
         total = sum(v for _, v in hand)
         aces = sum(1 for _, v in hand if v == 11)
         while total > 21 and aces:
@@ -986,51 +1192,47 @@ async def blackjack(interaction: discord.Interaction, bet: int = 10):
             aces -= 1
         return total
 
-    def format_hand(hand):
-        return " ".join(f"{c}" for c, _ in hand)
+    def fmt(hand):
+        return " ".join(c for c, _ in hand)
 
-    player_hand = [draw_card() for _ in range(2)]
-    dealer_hand = [draw_card() for _ in range(2)]
+    def fmt_dealer(dealer_hand):
+        return f"{dealer_hand[0][0]} + 🂠"
 
-    player_total = hand_value(player_hand)
-    if player_total < 17:
-        player_hand.append(draw_card())
-        player_total = hand_value(player_hand)
+    player_hand = [draw(), draw()]
+    dealer_hand = [draw(), draw()]
+    player_total = calc(player_hand)
 
-    while hand_value(dealer_hand) < 17:
-        dealer_hand.append(draw_card())
-    dealer_total = hand_value(dealer_hand)
+    add_balance(user_id, -bet)
 
-    if player_total > 21:
-        msg = f"💀 You **busted** with {player_total}! Dealer wins."
-        color = discord.Color.red()
-        add_balance(interaction.user.id, -bet)
-    elif dealer_total > 21:
-        add_balance(interaction.user.id, bet * 2)
-        msg = f"🎉 Dealer **busted** with {dealer_total}! You win **{bet * 2}** coins!"
-        color = discord.Color.green()
-    elif player_total > dealer_total:
-        add_balance(interaction.user.id, bet * 2)
-        msg = f"🎉 You **win** {player_total} vs {dealer_total}! +**{bet * 2}** coins!"
-        color = discord.Color.green()
-    elif player_total == dealer_total:
-        add_balance(interaction.user.id, bet)
-        msg = f"🤝 **Push!** Both have {player_total}. Bet returned."
-        color = discord.Color.orange()
-    else:
-        add_balance(interaction.user.id, -bet)
-        msg = f"😔 Dealer wins {dealer_total} vs your {player_total}. -{bet} coins."
-        color = discord.Color.red()
+    def make_embed(desc, color_func, reveal_dealer=False):
+        e = discord.Embed(
+            title=f"🃏 {interaction.user.display_name} — Blackjack",
+            description=desc,
+            color=color_func()
+        )
+        e.set_footer(text=f"Bet: {bet} 🪙 • Balance: {get_balance(user_id)} 🪙")
+        return e
 
-    embed = discord.Embed(
-        title="🃏 Blackjack",
-        description=f"**Your hand:** {format_hand(player_hand)} → **{player_total}**\n"
-                    f"**Dealer:** {format_hand(dealer_hand)} → **{dealer_total}**\n\n"
-                    f"{msg}\n\n**New balance:** {get_balance(interaction.user.id)} 🪙",
-        color=color
+    game_state = {
+        "player_hand": player_hand,
+        "dealer_hand": dealer_hand,
+        "player_total": player_total,
+        "bet": bet,
+        "draw": draw,
+        "calc": calc,
+        "fmt": fmt,
+        "fmt_dealer": fmt_dealer,
+        "make_embed": make_embed,
+        "over": False,
+    }
+    BLACKJACK_GAMES[user_id] = game_state
+
+    view = BlackjackView(user_id)
+    embed = make_embed(
+        f"**Your hand:** {fmt(player_hand)} → **{player_total}**\n**Dealer:** {fmt_dealer(dealer_hand)}\n\nHit or Stand?",
+        discord.Color.gold
     )
-    embed.set_footer(text="Simplified: auto-hit under 17 • Dealer hits to 17 • 2x payout on win")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=view)
 
 # ---- STAFF ECONOMY ----
 
